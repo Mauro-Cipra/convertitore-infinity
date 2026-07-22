@@ -7,7 +7,7 @@ import io
 st.set_page_config(page_title="Convertitore Infinity", page_icon="🚗")
 
 st.title("🚗 Convertitore Fatture -> CSV Infinity")
-st.write("Ufficio Amministrazione: Carica i PDF delle fatture. Il sistema riconoscerà in automatico se si tratta di Punto Pratiche o U.P.A. Elio Gnocchi.")
+st.write("Ufficio Amministrazione: Carica i PDF delle fatture per la conversione automatica in CSV.")
 
 file_caricati = st.file_uploader("Trascina qui le fatture in PDF", type="pdf", accept_multiple_files=True)
 
@@ -19,9 +19,9 @@ if file_caricati:
             testo_completo = ""
             testo_layout = "" 
             for pagina in pdf.pages:
-                testo_completo += pagina.extract_text() + "\n"
+                testo_completo += (pagina.extract_text() or "") + "\n"
                 # Estraiamo rispettando gli spazi visivi per l'XML
-                testo_layout += pagina.extract_text(layout=True) + "\n"
+                testo_layout += (pagina.extract_text(layout=True) or "") + "\n"
                 
         # --- LOGICA 1: PUNTO PRATICHE ---
         if "UNTO PRATICHE" in testo_completo.upper() or "PUNTO PRATICHE" in testo_completo.upper():
@@ -37,7 +37,8 @@ if file_caricati:
             for pratica in pratiche:
                 targa_match = re.search(r"Targa\s+([A-Z0-9]+)", pratica)
                 telaio_match = re.search(r"Telaio\s+([A-Z0-9]+)", pratica)
-                if not targa_match or not telaio_match: continue
+                if not targa_match or not telaio_match: 
+                    continue
                     
                 targa = targa_match.group(1)
                 telaio = telaio_match.group(1)
@@ -52,9 +53,9 @@ if file_caricati:
                 dati_csv.append([num_fattura, data_fattura, targa, telaio, "0,00", f"{imponibile:.2f}".replace('.', ','), f"{iva:.2f}".replace('.', ','), ".22", competenza_lorda])
                 dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{totale_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
                 
-            if "2,00" in testo_completo.split("MEF")[1] if "MEF" in testo_completo else "":
-                 if len(dati_csv) > 0:
-                     dati_csv.append([num_fattura, data_fattura, dati_csv[-1][2], dati_csv[-1][3], "2,00", "0,00", "0,00", "", "0,00"])
+            if "2,00" in (testo_completo.split("MEF")[1] if "MEF" in testo_completo else ""):
+                if len(dati_csv) > 0:
+                    dati_csv.append([num_fattura, data_fattura, dati_csv[-1][2], dati_csv[-1][3], "2,00", "0,00", "0,00", "", "0,00"])
         
         # --- LOGICA 2: U.P.A. ELIO GNOCCHI ---
         elif "ELIO GNOCCHI" in testo_completo.upper() or "GNCLEI61M10F052J" in testo_completo:
@@ -95,20 +96,29 @@ if file_caricati:
                 
             # Aggiunge bollo se presente nel totale
             if re.search(r'MARCA DA BOLLO.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL):
-                 if len(dati_csv) > 0:
-                     dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
-                     
-        else:    # Elaborazione generica per tutti i nuovi fornitori (es. Ferraro)
-    # Esegui qui l'estrazione dei dati e l'append a dati_csv
-    dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
-            
-            
-        output = io.StringIO()
-        writer = csv.writer(output, delimiter=';')
-        writer.writerows(dati_csv)
-        csv_bytes = output.getvalue().encode('utf-8')
+                if len(dati_csv) > 0:
+                    dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
         
-        nome_csv = file_pdf.name.replace('.pdf', '.csv').replace('.PDF', '.csv')
-        
-        st.success(f"Fattura {num_fattura} elaborata con successo!")
-        st.download_button(label=f"⬇️ Scarica {nome_csv}", data=csv_bytes, file_name=nome_csv, mime="text/csv")
+        # --- LOGICA 3: ALTRI FORNITORI (es. Ferraro e generici) ---
+        else:
+            num_fattura_match = re.search(r"(?:Fattura|Numero|n\.)\s*n?\.\s*(\d+)", testo_completo, re.IGNORECASE)
+            data_fattura_match = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", testo_completo)
+            targa_match = re.search(r"(?:Targa|Targato)\s+([A-Z0-9]+)", testo_completo, re.IGNORECASE)
+
+            num_fattura = num_fattura_match.group(1) if num_fattura_match else "000"
+            data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
+            veicolo_corrente = targa_match.group(1) if targa_match else ""
+
+            dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
+            
+        # --- GENERAZIONE E DOWNLOAD CSV ---
+        if dati_csv:
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter=';')
+            writer.writerows(dati_csv)
+            csv_bytes = output.getvalue().encode('utf-8')
+            
+            nome_csv = file_pdf.name.replace('.pdf', '.csv').replace('.PDF', '.csv')
+            
+            st.success(f"Fattura {file_pdf.name} elaborata con successo!")
+            st.download_button(label=f"⬇️ Scarica {nome_csv}", data=csv_bytes, file_name=nome_csv, mime="text/csv", key=file_pdf.name)
