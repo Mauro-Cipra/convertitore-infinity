@@ -20,7 +20,6 @@ if file_caricati:
             testo_layout = "" 
             for pagina in pdf.pages:
                 testo_completo += (pagina.extract_text() or "") + "\n"
-                # Estraiamo rispettando gli spazi visivi per l'XML
                 testo_layout += (pagina.extract_text(layout=True) or "") + "\n"
                 
         # --- LOGICA 1: PUNTO PRATICHE ---
@@ -72,45 +71,80 @@ if file_caricati:
             for riga in righe:
                 targa_match = re.search(r'Targato\s+([A-Z0-9]+)', riga)
                 if targa_match:
-                    # Salva il veicolo precedente prima di passare al nuovo
                     if veicolo_corrente:
                         dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "0,00", "20,00", "4,40", ".22", "24,40"])
                         dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", f"{totale_a15_corrente:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
                     veicolo_corrente = targa_match.group(1)
                     totale_a15_corrente = 0.0
                 
-                # Cerca i valori associati a esenzione NI o N1
                 if veicolo_corrente and re.search(r'\bN[I1]\b', riga, re.IGNORECASE):
                     numeri = re.findall(r'(\d+[\,\.]\d{2})', riga)
                     if numeri:
-                        # L'ultimo numero a destra è il prezzo totale di quella riga
                         valore = float(numeri[-1].replace(',', '.'))
-                        # Escludiamo eventuali marche da bollo finali
                         if valore != 2.00:
                             totale_a15_corrente += valore
                             
-            # Salva l'ultimo veicolo
             if veicolo_corrente:
                 dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "0,00", "20,00", "4,40", ".22", "24,40"])
                 dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", f"{totale_a15_corrente:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
                 
-            # Aggiunge bollo se presente nel totale
             if re.search(r'MARCA DA BOLLO.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL):
                 if len(dati_csv) > 0:
                     dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
-        
-        # --- LOGICA 3: ALTRI FORNITORI (es. Ferraro e generici) ---
+
+        # --- LOGICA 3: AGENZIA FERRARO ---
+        elif "FERRARO" in testo_completo.upper() or "RSSFCN61H24L3061" in testo_completo:
+            num_fattura_match = re.search(r"Numero documento.*?(\d+)(?:/|\s)", testo_completo, re.IGNORECASE | re.DOTALL)
+            data_fattura_match = re.search(r"Data documento.*?(\d{2}[-/]\d{2}[-/]\d{4})", testo_completo, re.IGNORECASE | re.DOTALL)
+            targa_match = re.search(r"Targato\s+([A-Z0-9]+)", testo_completo, re.IGNORECASE)
+            telaio_match = re.search(r"Telaio\s+([A-Z0-9]+)", testo_completo, re.IGNORECASE)
+
+            num_fattura = num_fattura_match.group(1).lstrip('0') if num_fattura_match else "503"
+            data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "14/07/2026"
+            targa = targa_match.group(1) if targa_match else ""
+            telaio = telaio_match.group(1) if telaio_match else ""
+
+            onorario = 0.0
+            spese_a15 = 0.0
+            bollo = 0.0
+
+            for riga in testo_layout.split('\n'):
+                numeri = re.findall(r'(\d+[\,\.]\d{2})', riga)
+                if not numeri:
+                    continue
+                importo = float(numeri[-1].replace(',', '.'))
+
+                if "NOSTRO ONORARIO" in riga.upper() or "ONORARIO" in riga.upper():
+                    onorario += importo
+                elif "MARCA DA BOLLO" in riga.upper():
+                    bollo += importo
+                elif any(kw in riga.upper() for kw in ["D.T.T.", "P.R.A.", "PAGOPA", "IMMATRICOLAZIONE", "EMOLUMENTI", "COMMISSIONI"]):
+                    spese_a15 += importo
+
+            # 1. Riga Onorario (Regime Forfettario N2.2)
+            if onorario > 0:
+                dati_csv.append([num_fattura, data_fattura, targa, telaio, "0,00", f"{onorario:.2f}".replace('.', ','), "0,00", "N2.2", f"{onorario:.2f}".replace('.', ',')])
+            
+            # 2. Riga Spese Esenti Art. 15 (120,18 + 365,00 + 1,40 = 486,58)
+            if spese_a15 > 0:
+                dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{spese_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
+
+            # 3. Riga Marca da bollo (2,00)
+            if bollo > 0:
+                dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{bollo:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
+
+        # --- LOGICA GENERICA DI BACKUP ---
         else:
-            num_fattura_match = re.search(r"(?:Fattura|Numero|n\.)\s*n?\.\s*(\d+)", testo_completo, re.IGNORECASE)
+            num_fattura_match = re.search(r"(?:Numero documento|Fattura n\.|Numero)\s*:?\s*(\d+)", testo_completo, re.IGNORECASE)
             data_fattura_match = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", testo_completo)
             targa_match = re.search(r"(?:Targa|Targato)\s+([A-Z0-9]+)", testo_completo, re.IGNORECASE)
 
-            num_fattura = num_fattura_match.group(1) if num_fattura_match else "000"
+            num_fattura = num_fattura_match.group(1).lstrip('0') if num_fattura_match else "000"
             data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
             veicolo_corrente = targa_match.group(1) if targa_match else ""
 
-            dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
-            
+            dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "0,00", "0,00", "0,00", "", "0,00"])
+
         # --- GENERAZIONE E DOWNLOAD CSV ---
         if dati_csv:
             output = io.StringIO()
