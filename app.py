@@ -98,9 +98,10 @@ if file_caricati:
                  if len(dati_csv) > 0:
                      dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
                      
-        else:
-            st.warning(f"Fattura {file_pdf.name} non riconosciuta. Assicurati sia di Punto Pratiche o U.P.A. Elio Gnocchi.")
-            continue
+        else:    # Elaborazione generica per tutti i nuovi fornitori (es. Ferraro)
+    # Esegui qui l'estrazione dei dati e l'append a dati_csv
+    dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
+            
             
         output = io.StringIO()
         writer = csv.writer(output, delimiter=';')
