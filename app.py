@@ -7,7 +7,7 @@ import io
 st.set_page_config(page_title="Convertitore Infinity", page_icon="🚗")
 
 st.title("🚗 Convertitore Fatture -> CSV Infinity")
-st.write("Ufficio Amministrazione: Carica i PDF delle fatture per la conversione automatica in CSV.")
+st.write("Ufficio Amministrazione: Carica i PDF delle fatture. Il sistema riconoscerà in automatico l'agenzia (Punto Pratiche, Elio Gnocchi o Di Lecce Massimiliano).")
 
 file_caricati = st.file_uploader("Trascina qui le fatture in PDF", type="pdf", accept_multiple_files=True)
 
@@ -19,10 +19,10 @@ if file_caricati:
             testo_completo = ""
             testo_layout = "" 
             for pagina in pdf.pages:
-                testo_completo += (pagina.extract_text() or "") + "\n"
-                testo_layout += (pagina.extract_text(layout=True) or "") + "\n"
+                testo_completo += pagina.extract_text() + "\n"
+                testo_layout += pagina.extract_text(layout=True) + "\n"
                 
-        # --- LOGICA 1: PUNTO PRATICHE ---
+        # --- LOGICA 1: PUNTO PRATICHE (Grafica Standard) ---
         if "UNTO PRATICHE" in testo_completo.upper() or "PUNTO PRATICHE" in testo_completo.upper():
             imponibile_36, iva_36 = (29.51, 6.49)
             imponibile_33, iva_33 = (27.05, 5.95)
@@ -36,8 +36,7 @@ if file_caricati:
             for pratica in pratiche:
                 targa_match = re.search(r"Targa\s+([A-Z0-9]+)", pratica)
                 telaio_match = re.search(r"Telaio\s+([A-Z0-9]+)", pratica)
-                if not targa_match or not telaio_match: 
-                    continue
+                if not targa_match or not telaio_match: continue
                     
                 targa = targa_match.group(1)
                 telaio = telaio_match.group(1)
@@ -52,11 +51,54 @@ if file_caricati:
                 dati_csv.append([num_fattura, data_fattura, targa, telaio, "0,00", f"{imponibile:.2f}".replace('.', ','), f"{iva:.2f}".replace('.', ','), ".22", competenza_lorda])
                 dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{totale_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
                 
-            if "2,00" in (testo_completo.split("MEF")[1] if "MEF" in testo_completo else ""):
-                if len(dati_csv) > 0:
-                    dati_csv.append([num_fattura, data_fattura, dati_csv[-1][2], dati_csv[-1][3], "2,00", "0,00", "0,00", "", "0,00"])
+            if "2,00" in testo_completo.split("MEF")[1] if "MEF" in testo_completo else "":
+                 if len(dati_csv) > 0:
+                     dati_csv.append([num_fattura, data_fattura, dati_csv[-1][2], dati_csv[-1][3], "2,00", "0,00", "0,00", "", "0,00"])
         
-        # --- LOGICA 2: U.P.A. ELIO GNOCCHI ---
+        # --- LOGICA 2: DI LECCE MASSIMILIANO (XML Tabellare) ---
+        elif "DI LECCE MASSIMILIANO" in testo_completo.upper() or "IT01257280774" in testo_completo:
+            num_fattura_match = re.search(r"Numero documento.*?(\d+)", testo_completo, re.IGNORECASE | re.DOTALL)
+            data_fattura_match = re.search(r"Data documento.*?(\d{2}-\d{2}-\d{4})", testo_completo, re.IGNORECASE | re.DOTALL)
+            
+            num_fattura = num_fattura_match.group(1)[-4:] if num_fattura_match else "0000"
+            data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
+
+            targhe_blocks = re.split(r'Targa\s+([A-Z0-9]+)', testo_completo)
+            
+            for i in range(1, len(targhe_blocks), 2):
+                targa = targhe_blocks[i]
+                block = targhe_blocks[i+1]
+                
+                telaio_match = re.search(r"Telaio\s+([A-Z0-9]+)", block)
+                telaio = telaio_match.group(1) if telaio_match else ""
+                
+                imponibile = 29.51
+                iva = 6.49
+                competenza_lorda = "36,00"
+                if "18,03" in block or "18.03" in block:
+                    imponibile = 18.03
+                    iva = 3.97
+                    competenza_lorda = "22,00"
+                    
+                nums = re.findall(r'(\d+[\,\.]\d{2})', block)
+                floats = [float(n.replace(',', '.')) for n in nums]
+                
+                # Filtra gli importi eliminando imponibile, iva, qty (1.00) e bollo (2.00)
+                art15_candidates = [f for f in floats if f not in [imponibile, 22.0, 1.0, 2.0]]
+                
+                # Su XML i prezzi estratti (Unitario e Totale) si duplicano sempre, quindi dimezziamo la somma totale
+                totale_a15 = sum(art15_candidates) / 2
+                
+                dati_csv.append([num_fattura, data_fattura, targa, telaio, "0,00", f"{imponibile:.2f}".replace('.', ','), f"{iva:.2f}".replace('.', ','), ".22", competenza_lorda])
+                dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{totale_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
+                
+            if re.search(r'Bollo assolto.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL):
+                if len(dati_csv) > 0:
+                    ultimo_targa = dati_csv[-1][2]
+                    ultimo_telaio = dati_csv[-1][3]
+                    dati_csv.append([num_fattura, data_fattura, ultimo_targa, ultimo_telaio, "2,00", "0,00", "0,00", "", "0,00"])
+
+        # --- LOGICA 3: U.P.A. ELIO GNOCCHI ---
         elif "ELIO GNOCCHI" in testo_completo.upper() or "GNCLEI61M10F052J" in testo_completo:
             num_fattura_match = re.search(r"Numero documento.*?(\d+)(?:/|\s)", testo_completo, re.IGNORECASE | re.DOTALL)
             data_fattura_match = re.search(r"Data documento.*?(\d{2}-\d{2}-\d{4})", testo_completo, re.IGNORECASE | re.DOTALL)
@@ -89,70 +131,19 @@ if file_caricati:
                 dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", f"{totale_a15_corrente:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
                 
             if re.search(r'MARCA DA BOLLO.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL):
-                if len(dati_csv) > 0:
-                    dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
-
-        # --- LOGICA 3: AGENZIA FERRARO ---
-        elif "FERRARO" in testo_completo.upper() or "RSSFCN61H24L3061" in testo_completo:
-            num_fattura_match = re.search(r"Numero documento.*?(\d+)(?:/|\s)", testo_completo, re.IGNORECASE | re.DOTALL)
-            data_fattura_match = re.search(r"Data documento.*?(\d{2}[-/]\d{2}[-/]\d{4})", testo_completo, re.IGNORECASE | re.DOTALL)
-            targa_match = re.search(r"Targato\s+([A-Z0-9]+)", testo_completo, re.IGNORECASE)
-            telaio_match = re.search(r"Telaio\s+([A-Z0-9]+)", testo_completo, re.IGNORECASE)
-
-            num_fattura = num_fattura_match.group(1).lstrip('0') if num_fattura_match else "503"
-            data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "14/07/2026"
-            targa = targa_match.group(1) if targa_match else ""
-            telaio = telaio_match.group(1) if telaio_match else ""
-
-            onorario = 0.0
-            spese_a15 = 0.0
-            bollo = 0.0
-
-            for riga in testo_layout.split('\n'):
-                numeri = re.findall(r'(\d+[\,\.]\d{2})', riga)
-                if not numeri:
-                    continue
-                importo = float(numeri[-1].replace(',', '.'))
-
-                if "NOSTRO ONORARIO" in riga.upper() or "ONORARIO" in riga.upper():
-                    onorario += importo
-                elif "MARCA DA BOLLO" in riga.upper():
-                    bollo += importo
-                elif any(kw in riga.upper() for kw in ["D.T.T.", "P.R.A.", "PAGOPA", "IMMATRICOLAZIONE", "EMOLUMENTI", "COMMISSIONI"]):
-                    spese_a15 += importo
-
-            # 1. Riga Onorario (Regime Forfettario N2.2)
-            if onorario > 0:
-                dati_csv.append([num_fattura, data_fattura, targa, telaio, "0,00", f"{onorario:.2f}".replace('.', ','), "0,00", "N2.2", f"{onorario:.2f}".replace('.', ',')])
-            
-            # 2. Riga Spese Esenti Art. 15 (120,18 + 365,00 + 1,40 = 486,58)
-            if spese_a15 > 0:
-                dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{spese_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
-
-            # 3. Riga Marca da bollo (2,00)
-            if bollo > 0:
-                dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{bollo:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
-
-        # --- LOGICA GENERICA DI BACKUP ---
+                 if len(dati_csv) > 0:
+                     dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "2,00", "0,00", "0,00", "", "0,00"])
+                     
         else:
-            num_fattura_match = re.search(r"(?:Numero documento|Fattura n\.|Numero)\s*:?\s*(\d+)", testo_completo, re.IGNORECASE)
-            data_fattura_match = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", testo_completo)
-            targa_match = re.search(r"(?:Targa|Targato)\s+([A-Z0-9]+)", testo_completo, re.IGNORECASE)
-
-            num_fattura = num_fattura_match.group(1).lstrip('0') if num_fattura_match else "000"
-            data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
-            veicolo_corrente = targa_match.group(1) if targa_match else ""
-
-            dati_csv.append([num_fattura, data_fattura, veicolo_corrente, "", "0,00", "0,00", "0,00", "", "0,00"])
-
-        # --- GENERAZIONE E DOWNLOAD CSV ---
-        if dati_csv:
-            output = io.StringIO()
-            writer = csv.writer(output, delimiter=';')
-            writer.writerows(dati_csv)
-            csv_bytes = output.getvalue().encode('utf-8')
+            st.warning(f"Fattura {file_pdf.name} non riconosciuta. Assicurati sia di Punto Pratiche, UPA Elio Gnocchi o Di Lecce Massimiliano.")
+            continue
             
-            nome_csv = file_pdf.name.replace('.pdf', '.csv').replace('.PDF', '.csv')
-            
-            st.success(f"Fattura {file_pdf.name} elaborata con successo!")
-            st.download_button(label=f"⬇️ Scarica {nome_csv}", data=csv_bytes, file_name=nome_csv, mime="text/csv", key=file_pdf.name)
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter=';')
+        writer.writerows(dati_csv)
+        csv_bytes = output.getvalue().encode('utf-8')
+        
+        nome_csv = file_pdf.name.replace('.pdf', '.csv').replace('.PDF', '.csv')
+        
+        st.success(f"Fattura elaborata con successo!")
+        st.download_button(label=f"⬇️ Scarica {nome_csv}", data=csv_bytes, file_name=nome_csv, mime="text/csv")
