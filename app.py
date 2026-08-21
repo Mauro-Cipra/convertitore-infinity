@@ -63,40 +63,57 @@ if file_caricati:
             num_fattura = num_fattura_match.group(1)[-4:] if num_fattura_match else "0000"
             data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
 
-            targhe_blocks = re.split(r'Targa\s+([A-Z0-9]+)', testo_completo)
+            # Crea un dizionario associando ogni targa al suo telaio corretto
+            mappa_telai = dict(re.findall(r'Targa\s+([A-Z0-9]+)\s+Telaio\s+([A-Z0-9]+)', testo_completo, re.IGNORECASE))
+
+            # Legge riga per riga per non sfalsare le colonne
+            righe = testo_layout.split('\n')
+            veicolo_corrente = None
+            imponibile_corrente = 29.51
+            iva_corrente = 6.49
+            competenza_lorda = "36,00"
+            totale_a15_corrente = 0.0
             
-            for i in range(1, len(targhe_blocks), 2):
-                targa = targhe_blocks[i]
-                block = targhe_blocks[i+1]
-                
-                telaio_match = re.search(r"Telaio\s+([A-Z0-9]+)", block)
-                telaio = telaio_match.group(1) if telaio_match else ""
-                
-                imponibile = 29.51
-                iva = 6.49
-                competenza_lorda = "36,00"
-                if "18,03" in block or "18.03" in block:
-                    imponibile = 18.03
-                    iva = 3.97
-                    competenza_lorda = "22,00"
+            for riga in righe:
+                targa_match = re.search(r'Targa\s+([A-Z0-9]+)', riga)
+                if targa_match:
+                    if veicolo_corrente:
+                        telaio_corrente = mappa_telai.get(veicolo_corrente, "")
+                        dati_csv.append([num_fattura, data_fattura, veicolo_corrente, telaio_corrente, "0,00", f"{imponibile_corrente:.2f}".replace('.', ','), f"{iva_corrente:.2f}".replace('.', ','), ".22", competenza_lorda])
+                        dati_csv.append([num_fattura, data_fattura, veicolo_corrente, telaio_corrente, f"{totale_a15_corrente:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
                     
-                nums = re.findall(r'(\d+[\,\.]\d{2})', block)
-                floats = [float(n.replace(',', '.')) for n in nums]
+                    veicolo_corrente = targa_match.group(1)
+                    totale_a15_corrente = 0.0
+                    imponibile_corrente = 29.51
+                    iva_corrente = 6.49
+                    competenza_lorda = "36,00"
                 
-                # Filtra gli importi eliminando imponibile, iva, qty (1.00) e bollo (2.00)
-                art15_candidates = [f for f in floats if f not in [imponibile, 22.0, 1.0, 2.0]]
+                # Cerca l'imponibile corretto (29.51 o 18.03) verificando la riga dell'IVA
+                if veicolo_corrente and "22,00" in riga:
+                    if "18,03" in riga or "18.03" in riga:
+                        imponibile_corrente = 18.03
+                        iva_corrente = 3.97
+                        competenza_lorda = "22,00"
+                        
+                # Somma i fuori campo IVA solo se sulla riga c'è la sigla N1 o NI
+                if veicolo_corrente and re.search(r'\bN[I1]\b', riga, re.IGNORECASE):
+                    numeri = re.findall(r'(\d+[\,\.]\d{2})', riga)
+                    if numeri:
+                        valore = float(numeri[-1].replace(',', '.'))
+                        if valore != 2.00:
+                            totale_a15_corrente += valore
+                            
+            if veicolo_corrente:
+                telaio_corrente = mappa_telai.get(veicolo_corrente, "")
+                dati_csv.append([num_fattura, data_fattura, veicolo_corrente, telaio_corrente, "0,00", f"{imponibile_corrente:.2f}".replace('.', ','), f"{iva_corrente:.2f}".replace('.', ','), ".22", competenza_lorda])
+                dati_csv.append([num_fattura, data_fattura, veicolo_corrente, telaio_corrente, f"{totale_a15_corrente:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
                 
-                # Su XML i prezzi estratti (Unitario e Totale) si duplicano sempre, quindi dimezziamo la somma totale
-                totale_a15 = sum(art15_candidates) / 2
-                
-                dati_csv.append([num_fattura, data_fattura, targa, telaio, "0,00", f"{imponibile:.2f}".replace('.', ','), f"{iva:.2f}".replace('.', ','), ".22", competenza_lorda])
-                dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{totale_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
-                
+            # Verifica il bollo di quietanza a fondo fattura
             if re.search(r'Bollo assolto.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL):
-                if len(dati_csv) > 0:
-                    ultimo_targa = dati_csv[-1][2]
-                    ultimo_telaio = dati_csv[-1][3]
-                    dati_csv.append([num_fattura, data_fattura, ultimo_targa, ultimo_telaio, "2,00", "0,00", "0,00", "", "0,00"])
+                 if len(dati_csv) > 0:
+                     ultimo_targa = dati_csv[-1][2]
+                     ultimo_telaio = dati_csv[-1][3]
+                     dati_csv.append([num_fattura, data_fattura, ultimo_targa, ultimo_telaio, "2,00", "0,00", "0,00", "", "0,00"])
 
         # --- LOGICA 3: U.P.A. ELIO GNOCCHI ---
         elif "ELIO GNOCCHI" in testo_completo.upper() or "GNCLEI61M10F052J" in testo_completo:
