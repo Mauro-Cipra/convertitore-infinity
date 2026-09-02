@@ -3,37 +3,55 @@ import pdfplumber
 import re
 import csv
 import io
+from pdf2image import convert_from_bytes
+import pytesseract
 
 st.set_page_config(page_title="Convertitore Infinity", page_icon="🚗")
 
 st.title("🚗 Convertitore Fatture -> CSV Infinity")
-st.write("Ufficio Amministrazione: Carica i PDF delle fatture. Il sistema riconoscerà in automatico l'agenzia (Punto Pratiche, UPA Elio Gnocchi, Di Lecce Massimiliano, Ferraro, ecc.) e genererà il CSV.")
+st.write("Ufficio Amministrazione: Carica i PDF delle fatture. Se il PDF è un'immagine, il sistema userà l'OCR per leggerlo in automatico.")
 
 file_caricati = st.file_uploader("Trascina qui le fatture in PDF", type="pdf", accept_multiple_files=True)
 
 if file_caricati:
     for file_pdf in file_caricati:
         dati_csv = []
+        file_bytes = file_pdf.read()
         
-        with pdfplumber.open(file_pdf) as pdf:
-            testo_completo = ""
+        # 1. TENTATIVO DI LETTURA TESTO STANDARD
+        testo_completo = ""
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
             for pagina in pdf.pages:
                 testo_completo += (pagina.extract_text() or "") + "\n"
         
-        # Normalizzazione del testo per controlli infallibili sui nomi (rimuove spazi e punti)
-        testo_norm = testo_completo.upper().replace(".", "").replace(" ", "")
+        testo_norm = testo_completo.upper().replace(".", "").replace(" ", "").strip()
         
+        # 2. SE IL TESTO NON ESISTE, AVVIA L'OCR
+        if len(testo_norm) < 30:
+            st.info(f"🔄 Avvio lettura ottica (OCR) per {file_pdf.name}. Potrebbe richiedere qualche secondo...")
+            try:
+                # Converte il PDF in immagini (una per pagina)
+                immagini = convert_from_bytes(file_bytes)
+                testo_completo = ""
+                for img in immagini:
+                    # Legge il testo dall'immagine in italiano
+                    testo_completo += pytesseract.image_to_string(img, lang='ita') + "\n"
+                testo_norm = testo_completo.upper().replace(".", "").replace(" ", "").strip()
+            except Exception as e:
+                st.error(f"Errore OCR. Assicurati di aver creato i file packages.txt e requirements.txt su GitHub. Dettagli: {e}")
+                continue
+            
         # --- LOGICA 1: PUNTO PRATICHE ---
         if "UNTOPRATICHE" in testo_norm:
             imponibile_36, iva_36 = (29.51, 6.49)
             imponibile_33, iva_33 = (27.05, 5.95)
             
-            num_fattura_match = re.search(r"Fattura n\.\s*(\d+)", testo_completo)
-            data_fattura_match = re.search(r"del\s*(\d{2}/\d{2}/\d{4})", testo_completo)
+            num_fattura_match = re.search(r"Fattura n[\.\s]*(\d+)", testo_completo, re.IGNORECASE)
+            data_fattura_match = re.search(r"del\s*(\d{2}[-/]\d{2}[-/]\d{4})", testo_completo)
             num_fattura = num_fattura_match.group(1)[-4:] if num_fattura_match else "0000"
-            data_fattura = data_fattura_match.group(1) if data_fattura_match else "01/01/2026"
+            data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
             
-            pratiche = re.split(r"Prat\.\s*\d+", testo_completo)[1:] 
+            pratiche = re.split(r"Prat\.\s*\d+", testo_completo, flags=re.IGNORECASE)[1:] 
             for pratica in pratiche:
                 targa_match = re.search(r"Targa\s+([A-Z0-9]+)", pratica, re.IGNORECASE)
                 telaio_match = re.search(r"Telaio\s+([A-Z0-9]+)", pratica, re.IGNORECASE)
@@ -59,35 +77,34 @@ if file_caricati:
         
         # --- LOGICA 2: U.P.A. ELIO GNOCCHI ---
         elif "ELIOGNOCCHI" in testo_norm or "GNCLEI" in testo_norm:
-            num_fattura_match = re.search(r"Numero documento.*?(\d+)(?:/|\s)", testo_completo, re.IGNORECASE | re.DOTALL)
-            data_fattura_match = re.search(r"Data documento.*?(\d{2}[-/]\d{2}[-/]\d{4})", testo_completo, re.IGNORECASE | re.DOTALL)
+            num_fattura_match = re.search(r"(?:Numero documento|Fattura|TD01).*?(\d+)(?:/|\s)", testo_completo, re.IGNORECASE | re.DOTALL)
+            data_fattura_match = re.search(r"(?:Data documento|Data).*?(\d{2}[-/]\d{2}[-/]\d{4})", testo_completo, re.IGNORECASE | re.DOTALL)
             
             num_fattura = num_fattura_match.group(1).lstrip('0') if num_fattura_match else "000"
             data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
 
-            # Suddivide il testo in blocchi usando le targhe come punto di separazione
             parti = re.split(r'(?:Targato|Targa)\s+([A-Z0-9]+)', testo_completo, flags=re.IGNORECASE)
             
-            for i in range(1, len(parti), 2):
-                targa = parti[i].upper()
-                blocco = parti[i+1].replace('\n', ' ')
-                
-                # Trova tutti gli importi (es. 121,32 o 365,00) associati a N1 o NI nel blocco della targa
-                importi_esenti = re.findall(r'(\d+[\,\.]\d{2})\s*(?:N1|NI)\b', blocco, re.IGNORECASE)
-                
-                totale_a15 = 0.0
-                for imp in importi_esenti:
-                    valore = float(imp.replace(',', '.'))
-                    # Escludiamo le marche da bollo finali dal totale Art 15 per isolarle
-                    if valore != 2.00:
-                        totale_a15 += valore
-                        
-                # 1° riga: Onorario (20,00 + IVA)
-                dati_csv.append([num_fattura, data_fattura, targa, "", "0,00", "20,00", "4,40", ".22", "24,40"])
-                # 2° riga: Totale Spese Esenti Art. 15
-                dati_csv.append([num_fattura, data_fattura, targa, "", f"{totale_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
-                
-            # Verifica la presenza della marca da bollo finale da inserire come riga separata
+            if len(parti) > 1:
+                for i in range(1, len(parti), 2):
+                    targa = parti[i].upper()
+                    blocco = parti[i+1].replace('\n', ' ')
+                    
+                    # Cerca gli importi esenti. Aggiunto Nl nel caso l'OCR legga "1" come "l" minuscola
+                    importi_esenti = re.findall(r'(\d+[\,\.]\d{2})\s*(?:N1|NI|Nl)\b', blocco, re.IGNORECASE)
+                    
+                    totale_a15 = 0.0
+                    for imp in importi_esenti:
+                        valore = float(imp.replace(',', '.'))
+                        if valore != 2.00:
+                            totale_a15 += valore
+                            
+                    dati_csv.append([num_fattura, data_fattura, targa, "", "0,00", "20,00", "4,40", ".22", "24,40"])
+                    if totale_a15 > 0:
+                        dati_csv.append([num_fattura, data_fattura, targa, "", f"{totale_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
+            else:
+                 dati_csv.append([num_fattura, data_fattura, "", "", "0,00", "0,00", "0,00", "", "0,00"])
+
             if re.search(r'MARCA DA BOLLO.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL):
                 if len(dati_csv) > 0:
                     ultimo_veicolo = dati_csv[-1][2]
@@ -129,9 +146,9 @@ if file_caricati:
             if bollo > 0:
                 dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{bollo:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
 
-        # --- LOGICA 4: DI LECCE MASSIMILIANO O ALTRI FORNITORI GENERICI ---
+        # --- LOGICA 4: ALTRI FORNITORI GENERICI ---
         else:
-            num_fattura_match = re.search(r"(?:Numero documento|Fattura n\.|Numero)\s*:?\s*(\d+)", testo_completo, re.IGNORECASE)
+            num_fattura_match = re.search(r"(?:Numero documento|Fattura|n\.|Numero)\s*:?\s*(\d+)", testo_completo, re.IGNORECASE)
             data_fattura_match = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", testo_completo)
             targa_match = re.search(r"(?:Targa|Targato)\s+([A-Z0-9]+)", testo_completo, re.IGNORECASE)
 
