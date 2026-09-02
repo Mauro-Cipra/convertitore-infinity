@@ -1,2 +1,5 @@
 streamlit
 pdfplumber
+pdf2image
+pytesseract
+Pillow
