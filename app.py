@@ -30,11 +30,9 @@ if file_caricati:
         if len(testo_norm) < 30:
             st.info(f"🔄 Avvio lettura ottica (OCR) per {file_pdf.name}. Potrebbe richiedere qualche secondo...")
             try:
-                # Converte il PDF in immagini (una per pagina)
                 immagini = convert_from_bytes(file_bytes)
                 testo_completo = ""
                 for img in immagini:
-                    # Legge il testo dall'immagine in italiano
                     testo_completo += pytesseract.image_to_string(img, lang='ita') + "\n"
                 testo_norm = testo_completo.upper().replace(".", "").replace(" ", "").strip()
             except Exception as e:
@@ -90,7 +88,6 @@ if file_caricati:
                     targa = parti[i].upper()
                     blocco = parti[i+1].replace('\n', ' ')
                     
-                    # Cerca gli importi esenti. Aggiunto Nl nel caso l'OCR legga "1" come "l" minuscola
                     importi_esenti = re.findall(r'(\d+[\,\.]\d{2})\s*(?:N1|NI|Nl)\b', blocco, re.IGNORECASE)
                     
                     totale_a15 = 0.0
@@ -145,8 +142,59 @@ if file_caricati:
                 dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{spese_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
             if bollo > 0:
                 dati_csv.append([num_fattura, data_fattura, targa, telaio, f"{bollo:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
+                
+        # --- LOGICA 4: DI LECCE MASSIMILIANO ---
+        elif "DILECCEMASSIMILIANO" in testo_norm or "DLCMSM" in testo_norm:
+            num_fattura_match = re.search(r"(?:Numero documento|Fattura|TD01).*?(\d+)(?:/|\s)", testo_completo, re.IGNORECASE | re.DOTALL)
+            data_fattura_match = re.search(r"(?:Data documento|Data).*?(\d{2}[-/]\d{2}[-/]\d{4})", testo_completo, re.IGNORECASE | re.DOTALL)
+            
+            num_fattura = num_fattura_match.group(1).lstrip('0') if num_fattura_match else "000"
+            data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
 
-        # --- LOGICA 4: ALTRI FORNITORI GENERICI ---
+            targhe = re.findall(r'(?:Targa|Targato)\s+([A-Z0-9]+)', testo_completo, re.IGNORECASE)
+            onorari = re.findall(r'(\d+[\,\.]\d{2})\s*22[\,\.]00\b', testo_completo.replace('\n', ' '))
+            
+            parti = re.split(r'(?:Targa|Targato)\s+[A-Z0-9]+', testo_completo, flags=re.IGNORECASE)
+            
+            if len(parti) > 1:
+                for i, targa in enumerate(targhe):
+                    onorario_str = onorari[i] if i < len(onorari) else "0,00"
+                    onorario_val = float(onorario_str.replace(',', '.'))
+                    
+                    blocco = parti[i+1].replace('\n', ' ')
+                    importi_esenti = re.findall(r'(\d+[\,\.]\d{2})\s*(?:N1|NI|Nl)\b', blocco, re.IGNORECASE)
+                    
+                    totale_a15 = 0.0
+                    for imp in importi_esenti:
+                        valore = float(imp.replace(',', '.'))
+                        if valore != 2.00:
+                            totale_a15 += valore
+                            
+                    iva_val = round(onorario_val * 0.22, 2)
+                    totale_onorario = round(onorario_val + iva_val, 2)
+                    
+                    dati_csv.append([
+                        num_fattura, data_fattura, targa.upper(), "", "0,00", 
+                        f"{onorario_val:.2f}".replace('.', ','), 
+                        f"{iva_val:.2f}".replace('.', ','), 
+                        ".22", 
+                        f"{totale_onorario:.2f}".replace('.', ',')
+                    ])
+                    
+                    if totale_a15 > 0:
+                        dati_csv.append([
+                            num_fattura, data_fattura, targa.upper(), "", 
+                            f"{totale_a15:.2f}".replace('.', ','), 
+                            "0,00", "0,00", "", "0,00"
+                        ])
+                        
+                if re.search(r'\b2[\,\.]00\b', testo_completo, re.IGNORECASE):
+                    if len(targhe) > 0:
+                        dati_csv.append([num_fattura, data_fattura, targhe[-1].upper(), "", "2,00", "0,00", "0,00", "", "0,00"])
+            else:
+                 dati_csv.append([num_fattura, data_fattura, "", "", "0,00", "0,00", "0,00", "", "0,00"])
+
+        # --- LOGICA 5: ALTRI FORNITORI GENERICI ---
         else:
             num_fattura_match = re.search(r"(?:Numero documento|Fattura|n\.|Numero)\s*:?\s*(\d+)", testo_completo, re.IGNORECASE)
             data_fattura_match = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", testo_completo)
