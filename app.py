@@ -96,13 +96,63 @@ def pratiche_sdi(testo):
     return pratiche, bollo, avvisi
 
 def riepilogo_sdi(testo):
-    """Totali del 'RIEPILOGHI IVA E TOTALI' per la quadratura."""
+    """
+    Totali del 'RIEPILOGHI IVA E TOTALI' per la quadratura: {aliquota/natura: totale imponibile}.
+    Gestisce sia il layout lungo (Di Lecce: ... 0,00 0,00 307,36 67,62) sia quello corto
+    (Centro Servizi: 22,00 51,49 11,33 / N1 487,18 0): l'imponibile è il penultimo importo.
+    """
     tot = {}
     for l in testo.splitlines():
-        m = re.match(rf"^I \(esigibilit.*?\)\s+(N\d(?:\.\d)?|\d{{1,2}},\d{{2}})\s+{IMP}\s+{IMP}\s+({IMP})\s+({IMP}|0)$", l.strip())
+        m = re.match(r"^(?:I \(esigibilit|Esigib).*?\s(N\d(?:\.\d)?|\d{1,2},\d{2})\s+(.*)$", l.strip())
         if m:
-            tot[m.group(1)] = dec(m.group(2))
+            valori = re.findall(r"-?\d{1,3}(?:\.\d{3})*,\d{2}\b|(?<![\d,])0(?![\d,])", m.group(2))
+            if len(valori) >= 2:
+                tot[m.group(1)] = dec(valori[-2]) if valori[-2] != "0" else Decimal("0")
     return tot
+
+
+# ---------------------------------------------------------------------
+# CENTRO SERVIZI AUTOMOBILISTICI (P.IVA 02743500783)
+# Layout: per ogni veicolo una riga "TARGA: XX000XX" seguita dalle spese N1;
+# le righe al 22% (COMPETENZE, STAMPATI/ACCESSI) sono UNA volta sola in fondo
+# per tutte le targhe e vanno ripartite in parti uguali fra i veicoli.
+# ---------------------------------------------------------------------
+RE_RIGA_CENTRO = re.compile(r"^(.*?)\s+(\d+,\d+)\s+(-?[\d.]*\d,\d+)\s+(\d{1,2},\d{2}|N\d(?:\.\d)?)\s+(-?[\d.]*\d,\d+)$")
+RE_TARGA_CENTRO = re.compile(r"TARGA\s*:\s*([A-Z]{2}\s?\d{3}\s?[A-Z]{2}|[A-Z0-9]{5,8})\b")
+
+def veicoli_centro_servizi(testo):
+    veicoli, avvisi = [], []
+    imponibile_comune = Decimal("0")
+    for l in (x.strip() for x in testo.splitlines()):
+        if l.upper().startswith("RIEPILOGHI IVA"):
+            break
+        t = RE_TARGA_CENTRO.search(l.upper())
+        if t:
+            veicoli.append({"targa": t.group(1).replace(" ", ""), "esente": Decimal("0")})
+            continue
+        m = RE_RIGA_CENTRO.match(l)
+        if not m:
+            continue
+        desc, _q, _p, aliq, tot = m.groups()
+        importo = dec(tot)
+        if aliq.startswith("N"):
+            if veicoli:
+                veicoli[-1]["esente"] += importo
+            else:
+                avvisi.append(f"Spesa esente senza targa: {desc} {tot}")
+        else:
+            imponibile_comune += importo
+    # ripartizione in parti uguali; l'ultimo veicolo assorbe i centesimi di arrotondamento
+    if veicoli:
+        tot_imp = cent(imponibile_comune)
+        tot_iva = cent(imponibile_comune * Decimal("0.22"))
+        quota_imp = cent(tot_imp / len(veicoli))
+        quota_iva = cent(tot_iva / len(veicoli))
+        for i, v in enumerate(veicoli):
+            ultimo = i == len(veicoli) - 1
+            v["imponibile"] = tot_imp - quota_imp * (len(veicoli) - 1) if ultimo else quota_imp
+            v["iva"] = tot_iva - quota_iva * (len(veicoli) - 1) if ultimo else quota_iva
+    return veicoli, avvisi
 
 def fmt_eur(x):
     """Decimal -> '24,40'"""
@@ -270,6 +320,23 @@ def estrai_righe(file_pdf):
         if bollo_mef > 0 and pratiche:
             dati_csv.append([num_fattura, data_fattura, pratiche[-1]["targa"], pratiche[-1]["telaio"],
                              fmt_eur(bollo_mef), "0,00", "0,00", "", "0,00"])
+
+    # --- LOGICA 4b: CENTRO SERVIZI AUTOMOBILISTICI ---
+    elif "CENTROSERVIZIAUTOMOBILISTICI" in testo_norm or "02743500783" in testo_norm:
+        num_fattura, data_fattura = numero_data_sdi(testo_completo)
+        num_fattura = num_fattura or "000"
+        data_fattura = data_fattura or "01/01/2026"
+        veicoli, avvisi_cs = veicoli_centro_servizi(testo_completo)
+        for avviso in avvisi_cs:
+            st.warning(f"{file_pdf.name}: {avviso}")
+        for v in veicoli:
+            if v["imponibile"] > 0:
+                dati_csv.append([num_fattura, data_fattura, v["targa"], "", "0,00",
+                                 fmt_eur(v["imponibile"]), fmt_eur(v["iva"]), ".22",
+                                 fmt_eur(v["imponibile"] + v["iva"])])
+            if v["esente"] > 0:
+                dati_csv.append([num_fattura, data_fattura, v["targa"], "",
+                                 fmt_eur(v["esente"]), "0,00", "0,00", "", "0,00"])
 
     # --- LOGICA 5: ALTRI FORNITORI GENERICI ---
     else:
