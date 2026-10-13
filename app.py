@@ -671,9 +671,11 @@ def formatta_usati_iva(r):
     return [num, data, targa, telaio, imponibile, esente, iva, cod]
 
 def formatta_margine(r):
-    # 9 colonne: num;data;targa;telaio;ESENTE;IMPONIBILE;IVA;cod;TOTALE (= esente + imponibile)
+    # 9 colonne: num;data;targa;telaio;ESENTE;IMPONIBILE;IVA;cod;COSTO (colonna I = F + G = imponibile + IVA)
+    # Nel margine l'IVA è indetraibile e va tutta a costo: 25,00 + 5,50 -> 30,50.
+    # Le righe esenti hanno F e G a zero, quindi I = 0,00 (l'esente resta nella colonna E).
     num, data, targa, telaio, esente, imponibile, iva, cod = r[:8]
-    return [num, data, targa, telaio, esente, imponibile, iva, cod, fmt_eur(_imp(esente) + _imp(imponibile))]
+    return [num, data, targa, telaio, esente, imponibile, iva, cod, fmt_eur(_imp(imponibile) + _imp(iva))]
 
 TIPI = [
     ("nuovi",   "🆕 Veicoli nuovi",          "Immatricolazioni di veicoli nuovi",       formatta_nuovi,     "NUOVI"),
