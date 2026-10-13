@@ -5,18 +5,120 @@ import csv
 import io
 from pdf2image import convert_from_bytes
 import pytesseract
+from decimal import Decimal, ROUND_HALF_UP
+
+# =====================================================================
+# FUNZIONI PER IL FORMATO "FATTURA ELETTRONICA SDI"
+# (PDF di cortesia con "Tipo dato: DESCR. / Rif. testo: ..." sotto le righe)
+# =====================================================================
+IMP = r"\d{1,3}(?:\.\d{3})*,\d{2}"
+# Riga articolo della fattura SDI: Descrizione  Quantità  Prezzo  %IVA (22,00 o N1…)  Totale
+RE_RIGA_ARTICOLO = re.compile(rf"^(.*?)\s+({IMP})\s+(-?{IMP})\s+(\d{{1,2}},\d{{2}}|N\d(?:\.\d)?)\s+(-?{IMP})$")
+RE_TARGA_SDI = re.compile(r"Rif\. testo:\s*Targa\s+([A-Z0-9]{5,8})\b", re.I)
+RE_TELAIO = re.compile(r"\b([A-HJ-NPR-Z0-9]{17})\b")
+
+def dec(s):
+    return Decimal(s.replace(".", "").replace(",", "."))
+
+def cent(x):
+    return x.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+def numero_data_sdi(testo):
+    """Riga 'TD01 fattura 20260001151 09-10-2026' della fattura elettronica."""
+    m = re.search(r"\bTD\d{2}\b\D*?(\d{3,})\s+(\d{2})[-/](\d{2})[-/](\d{4})", testo)
+    if not m:
+        return None, None
+    numero, g, mese, anno = m.groups()
+    if numero.startswith(anno) and len(numero) > 4:   # 20260001151 -> 0001151
+        numero = numero[4:]
+    return (numero.lstrip("0") or "0"), f"{g}/{mese}/{anno}"
+
+def pratiche_sdi(testo):
+    """
+    Restituisce (pratiche, bollo_virtuale, avvisi).
+    Regola del formato SDI: i 'Rif. testo' (Prat., Targa…) sono stampati SOTTO la riga
+    articolo a cui sono agganciati. Quindi la riga articolo subito prima di 'Prat.' è la
+    prima riga della NUOVA pratica; le righe successive appartengono a quella pratica
+    fino alla riga che precede la 'Prat.' seguente.
+    """
+    linee = [l.strip() for l in testo.splitlines()]
+    pratiche, avvisi = [], []
+    bollo = Decimal("0")
+    ultima_riga = None          # ultima riga articolo letta (candidata a 'testata' della prossima pratica)
+    attesa_telaio = False
+    for i, l in enumerate(linee):
+        if l.upper().startswith("RIEPILOGHI IVA"):
+            break
+        if "Rif. testo:" in l and re.search(r"Rif\. testo:\s*Prat\.", l, re.I):
+            nuova = {"targa": "", "telaio": "", "imponibile": [], "esente": []}
+            # la riga articolo appena letta appartiene a questa pratica, non alla precedente
+            if ultima_riga is not None and pratiche:
+                pratiche[-1]["_righe"].remove(ultima_riga)
+            nuova["_righe"] = [ultima_riga] if ultima_riga is not None else []
+            pratiche.append(nuova)
+            ultima_riga = None
+            continue
+        m = RE_TARGA_SDI.search(l)
+        if m and pratiche:
+            pratiche[-1]["targa"] = m.group(1).upper()
+            t = RE_TELAIO.search(l[m.end():])
+            if t:
+                pratiche[-1]["telaio"] = t.group(1)
+            else:
+                attesa_telaio = True
+            continue
+        if attesa_telaio and pratiche:
+            t = RE_TELAIO.search(l)
+            if t:
+                pratiche[-1]["telaio"] = t.group(1)
+                attesa_telaio = False
+                continue
+        m = RE_RIGA_ARTICOLO.match(l)
+        if m:
+            desc, _q, _p, aliq, tot = m.groups()
+            riga = (desc, aliq, dec(tot))
+            if "BOLLO ASSOLTO" in desc.upper():        # bollo virtuale MEF della fattura: riga a parte
+                bollo += dec(tot)
+                ultima_riga = None
+                continue
+            if pratiche:
+                pratiche[-1]["_righe"].append(riga)
+            elif ultima_riga is not None:
+                avvisi.append(f"Riga senza pratica ignorata: {ultima_riga[0]}")
+            ultima_riga = riga
+    for p in pratiche:
+        for desc, aliq, tot in p.pop("_righe"):
+            (p["esente"] if aliq.startswith("N") else p["imponibile"]).append(tot)
+        p["esente"] = sum(p["esente"], Decimal("0"))
+        p["imponibile"] = sum(p["imponibile"], Decimal("0"))
+        if not p["targa"]:
+            avvisi.append("Pratica senza targa trovata")
+    return pratiche, bollo, avvisi
+
+def riepilogo_sdi(testo):
+    """Totali del 'RIEPILOGHI IVA E TOTALI' per la quadratura."""
+    tot = {}
+    for l in testo.splitlines():
+        m = re.match(rf"^I \(esigibilit.*?\)\s+(N\d(?:\.\d)?|\d{{1,2}},\d{{2}})\s+{IMP}\s+{IMP}\s+({IMP})\s+({IMP}|0)$", l.strip())
+        if m:
+            tot[m.group(1)] = dec(m.group(2))
+    return tot
+
+def fmt_eur(x):
+    """Decimal -> '24,40'"""
+    return str(cent(x)).replace(".", ",")
 
 st.set_page_config(page_title="Convertitore Infinity", page_icon="🚗")
 
 st.title("🚗 Convertitore Fatture -> CSV Infinity")
-st.write("Ufficio Amministrazione: Carica i PDF delle fatture. Se il PDF è un'immagine o vettoriale, il sistema userà l'OCR per leggerlo in automatico.")
+st.write("Ufficio Amministrazione: Carica i PDF delle fatture. Se il PDF è un'immagine, il sistema userà l'OCR per leggerlo in automatico.")
 
 file_caricati = st.file_uploader("Trascina qui le fatture in PDF", type="pdf", accept_multiple_files=True)
 
 if file_caricati:
     for file_pdf in file_caricati:
         dati_csv = []
-        file_bytes = file_pdf.read()
+        file_bytes = file_pdf.getvalue()
         
         # 1. TENTATIVO DI LETTURA TESTO STANDARD
         testo_completo = ""
@@ -26,7 +128,7 @@ if file_caricati:
         
         testo_norm = testo_completo.upper().replace(".", "").replace(" ", "").strip()
         
-        # 2. SE IL TESTO NON ESISTE, AVVIA L'OCR
+        # 2. SE IL TESTO NON ESISTE O E' CORROTTO, AVVIA L'OCR
         if len(testo_norm) < 30:
             st.info(f"🔄 Avvio lettura ottica (OCR) per {file_pdf.name}. Potrebbe richiedere qualche secondo...")
             try:
@@ -145,60 +247,31 @@ if file_caricati:
 
         # --- LOGICA 4: DI LECCE MASSIMILIANO ---
         elif "DILECCEMASSIMILIANO" in testo_norm or "DLCMSM" in testo_norm:
-            num_fattura_match = re.search(r"(?:Numero documento|TD01 fattura|Fattura).*?(\d+)(?:/|\s)", testo_completo, re.IGNORECASE | re.DOTALL)
-            data_fattura_match = re.search(r"Data documento.*?(\d{2}[-/]\d{2}[-/]\d{4})", testo_completo, re.IGNORECASE | re.DOTALL)
-            
-            num_fattura = num_fattura_match.group(1).lstrip('0') if num_fattura_match else "000"
-            data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
+            # Fattura elettronica SDI: i "Rif. testo: Prat./Targa" sono stampati SOTTO la riga
+            # a cui appartengono, quindi NON si può tagliare il testo sulla parola "Prat.".
+            # Le righe sono classificate dalla colonna %IVA (22,00 = competenza, N1 = Art.15).
+            num_fattura, data_fattura = numero_data_sdi(testo_completo)
+            num_fattura = num_fattura or "000"
+            data_fattura = data_fattura or "01/01/2026"
 
-            parti = re.split(r'Prat\.\s*\d+', testo_completo, flags=re.IGNORECASE)
-            
-            if len(parti) > 1:
-                for i in range(1, len(parti)):
-                    blocco = parti[i]
-                    # Appiattisce l'intero blocco pratica su una sola riga per blindare la lettura dei dati
-                    blocco_flat = blocco.replace('\n', ' ')
-                    
-                    targa_match = re.search(r'(?:Targa|Targato)\s+([A-Z0-9]+)', blocco_flat, re.IGNORECASE)
-                    if not targa_match:
-                        continue
-                    targa = targa_match.group(1).upper()
-                    
-                    # Usa espressioni regolari per pescare gli importi incollati alle sigle specifiche
-                    importi_esenti = re.findall(r'(\d+[\,\.]\d{2})\s*(?:N1|NI|Nl)\b', blocco_flat, re.IGNORECASE)
-                    importi_22 = re.findall(r'(\d+[\,\.]\d{2})\s*22[\,\.]00\b', blocco_flat, re.IGNORECASE)
-                    
-                    totale_a15 = 0.0
-                    for imp in importi_esenti:
-                        valore = float(imp.replace(',', '.'))
-                        if valore != 2.00:  # Esclude le marche da bollo
-                            totale_a15 += valore
-                            
-                    totale_22 = 0.0
-                    for imp in importi_22:
-                        valore = float(imp.replace(',', '.'))
-                        # In alcune righe sfalsate, se legge 10.20 come IVA, corregge l'errore dell'OCR
-                        if valore not in [10.20, 5.50]: 
-                            totale_22 += valore
-                    
-                    # Generazione delle righe nel CSV
-                    iva_22 = totale_22 * 0.22
-                    lordo_22 = totale_22 + iva_22
-                    
-                    if totale_22 > 0:
-                        dati_csv.append([num_fattura, data_fattura, targa, "", "0,00", f"{totale_22:.2f}".replace('.', ','), f"{iva_22:.2f}".replace('.', ','), ".22", f"{lordo_22:.2f}".replace('.', ',')])
-                    
-                    if totale_a15 > 0:
-                        dati_csv.append([num_fattura, data_fattura, targa, "", f"{totale_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
+            pratiche, bollo_mef, avvisi_dl = pratiche_sdi(testo_completo)
+            for avviso in avvisi_dl:
+                st.warning(f"{file_pdf.name}: {avviso}")
 
-            else:
-                 dati_csv.append([num_fattura, data_fattura, "", "", "0,00", "0,00", "0,00", "", "0,00"])
+            for p in pratiche:
+                if p["imponibile"] > 0:
+                    iva = cent(p["imponibile"] * Decimal("0.22"))
+                    dati_csv.append([num_fattura, data_fattura, p["targa"], p["telaio"], "0,00",
+                                     fmt_eur(p["imponibile"]), fmt_eur(iva), ".22",
+                                     fmt_eur(p["imponibile"] + iva)])
+                if p["esente"] > 0:
+                    dati_csv.append([num_fattura, data_fattura, p["targa"], p["telaio"],
+                                     fmt_eur(p["esente"]), "0,00", "0,00", "", "0,00"])
 
-            # Gestione della Marca da Bollo finale se isolata
-            if re.search(r'Marca da bollo.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL) or re.search(r'Bollo assolto.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL):
-                 if len(dati_csv) > 0:
-                     ultimo_veicolo = dati_csv[-1][2]
-                     dati_csv.append([num_fattura, data_fattura, ultimo_veicolo, "", "2,00", "0,00", "0,00", "", "0,00"])
+            # Bollo virtuale MEF (2,00) su riga separata, assegnato all'ultima targa
+            if bollo_mef > 0 and pratiche:
+                dati_csv.append([num_fattura, data_fattura, pratiche[-1]["targa"], pratiche[-1]["telaio"],
+                                 fmt_eur(bollo_mef), "0,00", "0,00", "", "0,00"])
 
         # --- LOGICA 5: ALTRI FORNITORI GENERICI ---
         else:
@@ -215,6 +288,30 @@ if file_caricati:
                     dati_csv.append([num_fattura, data_fattura, t.upper(), "", "0,00", "0,00", "0,00", "", "0,00"])
             else:
                 dati_csv.append([num_fattura, data_fattura, "", "", "0,00", "0,00", "0,00", "", "0,00"])
+
+        # --- NUMERO/DATA DA RIGA SDI (vale per tutte le agenzie con fattura elettronica) ---
+        # Prima il numero veniva preso da "TD01" -> "1". Se la riga SDI c'è, ha la precedenza.
+        num_sdi, data_sdi = numero_data_sdi(testo_completo)
+        if num_sdi:
+            for r in dati_csv:
+                r[0], r[1] = num_sdi, data_sdi
+
+        # --- QUADRATURA CON IL RIEPILOGO IVA DELLA FATTURA ---
+        riepilogo = riepilogo_sdi(testo_completo)
+        if riepilogo and dati_csv:
+            somma = lambda col, cond: sum((dec(r[col]) for r in dati_csv if cond(r[7])), Decimal("0"))
+            controlli = [
+                ("Esente Art.15 (N1)", somma(4, lambda c: True),
+                 sum((v for k, v in riepilogo.items() if k.startswith("N1")), Decimal("0"))),
+                ("Imponibile 22%", somma(5, lambda c: c == ".22"), riepilogo.get("22,00", Decimal("0"))),
+                ("Imponibile N2.2", somma(5, lambda c: c == "N2.2"), riepilogo.get("N2.2", Decimal("0"))),
+            ]
+            errori = [f"{nome}: CSV {fmt_eur(csv_v)} / fattura {fmt_eur(fatt)}"
+                      for nome, csv_v, fatt in controlli if csv_v != fatt]
+            if errori:
+                st.warning(f"⚠️ {file_pdf.name} NON quadra con il riepilogo IVA: " + " · ".join(errori))
+            else:
+                st.info(f"✅ {file_pdf.name}: totali quadrati con il riepilogo IVA della fattura.")
 
         # --- GENERAZIONE E DOWNLOAD CSV ---
         if dati_csv:
