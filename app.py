@@ -189,4 +189,42 @@ if file_caricati:
                         dati_csv.append([num_fattura, data_fattura, targa, "", "0,00", "0,00", "0,00", ".22", "0,00"])
                         
                     if totale_a15 > 0:
-                        dati_csv.append([num_fattura, data_fattura, targa, "", f"{totale_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00
+                        dati_csv.append([num_fattura, data_fattura, targa, "", f"{totale_a15:.2f}".replace('.', ','), "0,00", "0,00", "", "0,00"])
+
+            else:
+                 dati_csv.append([num_fattura, data_fattura, "", "", "0,00", "0,00", "0,00", "", "0,00"])
+
+            if re.search(r'Marca da bollo.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL) or re.search(r'Bollo assolto.*?\b2[\,\.]00\b', testo_completo, re.IGNORECASE | re.DOTALL):
+                 if len(dati_csv) > 0:
+                     ultimo_veicolo = dati_csv[-1][2]
+                     dati_csv.append([num_fattura, data_fattura, ultimo_veicolo, "", "2,00", "0,00", "0,00", "", "0,00"])
+
+        # --- LOGICA 5: ALTRI FORNITORI GENERICI ---
+        else:
+            num_fattura_match = re.search(r"(?:Numero documento|Fattura|n\.|Numero)\s*:?\s*(\d+)", testo_completo, re.IGNORECASE)
+            data_fattura_match = re.search(r"(\d{2}[/-]\d{2}[/-]\d{4})", testo_completo)
+            
+            num_fattura = num_fattura_match.group(1).lstrip('0') if num_fattura_match else "000"
+            data_fattura = data_fattura_match.group(1).replace('-', '/') if data_fattura_match else "01/01/2026"
+            
+            targhe = re.findall(r"(?:Targa|Targato)\s+([A-Z0-9]+)", testo_completo, re.IGNORECASE)
+            if targhe:
+                targhe_uniche = list(dict.fromkeys(targhe))
+                for t in targhe_uniche:
+                    dati_csv.append([num_fattura, data_fattura, t.upper(), "", "0,00", "0,00", "0,00", "", "0,00"])
+            else:
+                dati_csv.append([num_fattura, data_fattura, "", "", "0,00", "0,00", "0,00", "", "0,00"])
+
+        # --- GENERAZIONE E DOWNLOAD CSV ---
+        if dati_csv:
+            output = io.StringIO()
+            writer = csv.writer(output, delimiter=';')
+            writer.writerows(dati_csv)
+            csv_bytes = output.getvalue().encode('utf-8')
+            
+            nome_csv = file_pdf.name.replace('.pdf', '.csv').replace('.PDF', '.csv')
+            
+            st.success(f"Fattura {file_pdf.name} elaborata con successo!")
+            st.download_button(label=f"⬇️ Scarica {nome_csv}", data=csv_bytes, file_name=nome_csv, mime="text/csv", key=file_pdf.name)
+        else:
+            st.error(f"Impossibile estrarre i dati dalla fattura {file_pdf.name}. Verifica il layout.")
